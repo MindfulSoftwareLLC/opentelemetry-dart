@@ -19,7 +19,7 @@ void main() {
       sdk.SpanLimits());
 
   test('trace starts and ends span', () async {
-    final span = await traceContext('span', (_) async {
+    final span = await trace('span', () async {
       return spanFromContext(Context.current);
     }, tracer: tracer) as sdk.Span;
 
@@ -28,7 +28,7 @@ void main() {
   });
 
   test('traceSync starts and ends span', () {
-    final span = traceContextSync('span', (_) {
+    final span = traceSync('span', () {
       return spanFromContext(Context.current);
     }, tracer: tracer) as sdk.Span;
 
@@ -39,7 +39,7 @@ void main() {
   test('trace propagates context', () {
     final parent = tracer.startSpan('parent')..end();
 
-    traceContext('child', (_) async {
+    trace('child', () async {
       final child = spanFromContext(Context.current);
 
       expect(child.parentSpanId.toString(),
@@ -50,7 +50,7 @@ void main() {
   test('traceSync propagates context', () {
     final parent = tracer.startSpan('parent')..end();
 
-    traceContextSync('span', (_) {
+    traceSync('span', () {
       final child = spanFromContext(Context.current);
 
       expect(child.parentSpanId.toString(),
@@ -62,7 +62,7 @@ void main() {
     late sdk.Span span;
     var caught = false;
     try {
-      await traceContext('span', (_) async {
+      await trace('span', () async {
         span = spanFromContext(Context.current) as sdk.Span;
         throw Exception('Bang!');
       }, tracer: tracer);
@@ -88,7 +88,7 @@ void main() {
     late sdk.Span span;
     var caught = false;
     try {
-      traceContextSync('span', (_) {
+      traceSync('span', () {
         span = spanFromContext(Context.current) as sdk.Span;
         throw Exception('Bang!');
       }, tracer: tracer);

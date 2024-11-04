@@ -69,16 +69,14 @@ void main() {
     });
   });
 
-  group('active', () {
+  group('Context.current', () {
     test('returns root context', () {
       expect(api.Context.current, same(api.Context.root));
     });
 
     test('returns zone context', () {
       final context = api.Context.root.setValue(api.ContextKey(), 'c');
-      api
-          .zoneWithContext(context)
-          .run(() => expect(api.Context.current, same(context)));
+      api.zone(context).run(() => expect(api.Context.current, same(context)));
     });
 
     test('returns root stack attached context', () {
@@ -89,8 +87,7 @@ void main() {
     });
 
     test('returns non-root stack attached context', () {
-      final zone = api.Context.root.setValue(api.ContextKey(), 'z');
-      api.zoneWithContext(zone).run(() {
+      api.zone().run(() {
         final attached = api.Context.root.setValue(api.ContextKey(), 'a');
         final token = api.Context.attach(attached);
         expect(api.Context.current, same(attached));
@@ -98,31 +95,19 @@ void main() {
       });
     });
 
-    test('returns attached context over zone context', () {
-      final attached = api.Context.root.setValue(api.ContextKey(), 'foo');
-      final token = api.Context.attach(attached);
-
-      final zone = api.Context.root.setValue(api.ContextKey(), 'bar');
-      api.zoneWithContext(zone).run(() {
-        expect(api.Context.current, same(attached));
-      });
-
-      api.Context.detach(token);
-    });
-
     test('returns zone context after detach', () {
       final attached = api.Context.root.setValue(api.ContextKey(), 'foo');
       final token = api.Context.attach(attached);
 
       final zone = api.Context.root.setValue(api.ContextKey(), 'bar');
-      api.zoneWithContext(zone).run(() {
+      api.zone(zone).run(() {
         api.Context.detach(token);
         expect(api.Context.current, same(zone));
       });
     });
   });
 
-  group('detach', () {
+  group('Context.detach', () {
     test('returns true on match', () {
       final token = api.Context.attach(api.Context.current);
       expect(api.Context.detach(token), isTrue);
@@ -135,61 +120,34 @@ void main() {
       expect(api.Context.detach(token2), isTrue);
     });
 
-    test('returns true on match in zone', () {
+    test('returns true on match in default zone', () {
       final token1 = api.Context.attach(api.Context.current);
-      api.zoneWithContext(api.Context.current).run(() {
-        expect(api.Context.detach(token1), isTrue);
-      });
-
-      final token2 = api.Context.attach(api.Context.current);
       Zone.current.fork().run(() {
+        expect(api.Context.detach(token1), isTrue);
+
+        final token2 = api.Context.attach(api.Context.current);
         expect(api.Context.detach(token2), isTrue);
       });
     });
 
-    test('returns true on match in nested zone', () {
+    test('returns false on mismatch in otel zone', () {
       final token1 = api.Context.attach(api.Context.current);
-      api.zoneWithContext(api.Context.current).run(() {
-        api.zoneWithContext(api.Context.current).run(() {
-          expect(api.Context.detach(token1), isTrue);
-        });
-      });
+      api.zone(api.Context.current).run(() {
+        expect(api.Context.detach(token1), isFalse);
 
-      final token2 = api.Context.attach(api.Context.current);
-      api.zoneWithContext(api.Context.current).run(() {
+        final token2 = api.Context.attach(api.Context.current);
+        expect(api.Context.detach(token2), isTrue);
+      });
+    });
+
+    test('returns true on match in default nested zone', () {
+      final token1 = api.Context.attach(api.Context.current);
+      Zone.current.fork().run(() {
+        final token2 = api.Context.attach(api.Context.current);
         Zone.current.fork().run(() {
           expect(api.Context.detach(token2), isTrue);
+          expect(api.Context.detach(token1), isTrue);
         });
-      });
-
-      final token3 = api.Context.attach(api.Context.current);
-      Zone.current.fork().run(() {
-        api.zoneWithContext(api.Context.current).run(() {
-          expect(api.Context.detach(token3), isTrue);
-        });
-      });
-
-      final token4 = api.Context.attach(api.Context.current);
-      Zone.current.fork().run(() {
-        Zone.current.fork().run(() {
-          expect(api.Context.detach(token4), isTrue);
-        });
-      });
-    });
-
-    test('returns false on mismatch in zone', () {
-      final token1 = api.Context.attach(api.Context.current);
-      api.zoneWithContext(api.Context.current).run(() {
-        final token2 = api.Context.attach(api.Context.current);
-        expect(api.Context.detach(token1), isFalse);
-        expect(api.Context.detach(token2), isTrue);
-      });
-
-      final token3 = api.Context.attach(api.Context.current);
-      Zone.current.fork().run(() {
-        final token4 = api.Context.attach(api.Context.current);
-        expect(api.Context.detach(token3), isFalse);
-        expect(api.Context.detach(token4), isTrue);
       });
     });
   });

@@ -3,6 +3,7 @@
 
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 
@@ -18,7 +19,6 @@ final Logger _log = Logger('opentelemetry');
 // TODO: @sealed
 class ContextKey {}
 
-final ContextKey _contextKey = ContextKey();
 final ContextKey _contextStackKey = ContextKey();
 final ContextKey _spanKey = ContextKey();
 
@@ -52,22 +52,46 @@ SpanContext spanContextFromContext(Context context) {
 }
 
 @experimental
-Zone zoneWithContext(Context context) {
-  return Zone.current.fork(zoneValues: {
-    _contextKey: context,
-    _contextStackKey: <ContextStackEntry>[],
-  });
-}
+@Deprecated('This method will be removed in 0.19.0. Use [zone] instead.')
+Zone zoneWithContext(Context context) => zone(context);
 
 @experimental
-Context contextFromZone({Zone? zone}) {
-  return (zone ?? Zone.current)[_contextKey] ?? _rootContext;
-}
+@Deprecated('This method will be removed in 0.19.0. Use [Context.current] '
+    'instead.')
+Context contextFromZone({Zone? zone}) => _currentContext(zone);
+
+@experimental
+Zone zone([Context? context]) => Zone.current.fork(
+        specification: ZoneSpecification(run: <R>(self, parent, zone, fn) {
+          // Only attach the context when delegating this zone's run, not any
+          // potential child. Otherwise, the child zone's current context would
+          // end up being the outermost zone attached context.
+          if (self == zone) {
+            final token =
+                Context.attach(context ?? _currentContext(zone), zone);
+            try {
+              final result = parent.run(zone, fn);
+              if (result is Future<R>) {
+                return result.whenComplete(() => Context.detach(token, zone))
+                    as R;
+              } else {
+                Context.detach(token, zone);
+                return result;
+              }
+            } catch (e) {
+              Context.detach(token, zone);
+              rethrow;
+            }
+          }
+          return parent.run(zone, fn);
+        }),
+        zoneValues: {
+          _contextStackKey: <ContextStackEntry>[],
+        });
 
 /// Returns the latest non-empty context stack, or the root stack if no context
 /// stack is found.
-List<ContextStackEntry> get _activeAttachedContextStack {
-  var zone = Zone.current;
+List<ContextStackEntry> _currentContextStack(Zone zone) {
   List<ContextStackEntry>? stack = zone[_contextStackKey];
 
   // walk up the zone tree to find the first non-empty context stack
@@ -84,14 +108,9 @@ List<ContextStackEntry> get _activeAttachedContextStack {
   return stack ?? _rootStack;
 }
 
-Context? get _currentAttachedContext {
-  final stack = _activeAttachedContextStack;
-  return stack.isEmpty ? null : stack.last.context;
-}
-
-Context? get _currentZoneContext {
-  return Zone.current[_contextKey];
-}
+Context _currentContext([Zone? zone]) =>
+    _currentContextStack(zone ?? Zone.current).lastOrNull?.context ??
+    _rootContext;
 
 class Context {
   final Context? _parent;
@@ -107,10 +126,9 @@ class Context {
 
   /// The active context.
   ///
-  /// The active context is the latest attached context, if one exists, otherwise
-  /// the latest zone context, if one exists, otherwise the root context.
-  static Context get current =>
-      _currentAttachedContext ?? _currentZoneContext ?? _rootContext;
+  /// The current context is the latest attached context, if one exists.
+  /// Otherwise, it is the root context.
+  static Context get current => _currentContext();
 
   /// The root context which all other contexts are derived from.
   ///
@@ -135,15 +153,13 @@ class Context {
   /// to detach the [Context].
   ///
   /// When a [Context] is attached, it becomes active and overrides any [Context]
-  /// that may otherwise be visible within a [Zone]. For example, if a [Context]
-  /// is attached while [current] is called within a [Zone] created by
-  /// [zoneWithContext], [current] will return the attached [Context] and not the
-  /// [Context] given to [zoneWithContext]. Once the attached [Context] is
-  /// detached, [current] will return the [Context] given to [zoneWithContext].
+  /// that may otherwise be visible within that [Zone]. The [Context] will not
+  /// be visible to any parent or sibling [Zone]. The [Context] will only be
+  /// visible for the current [Zone] and any child [Zone].
   @experimental
-  static ContextToken attach(Context context) {
+  static ContextToken attach(Context context, [Zone? zone]) {
     final entry = ContextStackEntry(context);
-    (Zone.current[_contextStackKey] ?? _rootStack).add(entry);
+    (((zone ?? Zone.current)[_contextStackKey]) ?? _rootStack).add(entry);
     return entry.token;
   }
 
@@ -159,8 +175,8 @@ class Context {
   /// Regardless of whether the [Context] is found, if the given [ContextToken] is
   /// not expected, a warning will be logged.
   @experimental
-  static bool detach(ContextToken token) {
-    final stack = _activeAttachedContextStack;
+  static bool detach(ContextToken token, [Zone? zone]) {
+    final stack = _currentContextStack(zone ?? Zone.current);
 
     final index = stack.indexWhere((c) => c.token == token);
 
@@ -180,7 +196,7 @@ class Context {
     // stack held by a parent zone
 
     // walk up the zone tree checking for the token in each zone's context stack
-    Zone? zone = Zone.current;
+    zone ??= Zone.current;
     do {
       final stack = zone?[_contextStackKey] as List<ContextStackEntry>?;
       final index = stack?.indexWhere((c) => c.token == token);
@@ -199,6 +215,30 @@ class Context {
   /// Returns the value identified by [key], or null if no such value exists.
   T? getValue<T>(ContextKey key) =>
       _key == key ? _value as T : _parent?.getValue(key);
+
+  T? _getValue<T>(ContextKey key) {
+    // check this context version or its previous versions
+    final value = _key == key ? _value : _parent?.getValue(key);
+    if (value != null) {
+      return value as T;
+    }
+
+    // check other contexts within the current zone or a parent zone
+    Zone? zone = Zone.current;
+    while (zone != null) {
+      final List<ContextStackEntry>? stack = zone[_contextStackKey];
+      if (stack != null) {
+        for (final entry in stack.reversed) {
+          final value = entry.context.getValue(key);
+          if (value != null) {
+            return value as T;
+          }
+        }
+      }
+      zone = zone.parent;
+    }
+    return null;
+  }
 
   /// Returns a new child context containing the given key/value.
   Context setValue(ContextKey key, Object value) => Context._(this, key, value);

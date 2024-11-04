@@ -13,6 +13,7 @@ export 'src/api/context/context.dart'
         contextWithSpanContext,
         spanContextFromContext,
         spanFromContext,
+        zone,
         zoneWithContext;
 export 'src/api/context/context_manager.dart'
     show globalContextManager, registerGlobalContextManager;
