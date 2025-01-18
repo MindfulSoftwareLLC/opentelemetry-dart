@@ -77,8 +77,6 @@ class CollectorExporter implements sdk.SpanExporter {
 
     final body = pb_trace_service.ExportTraceServiceRequest(
         resourceSpans: _spansToProtobuf(spans));
-    final headers = {'Content-Type': 'application/x-protobuf'}
-      ..addAll(this.headers);
 
     while (retries < maxRetries) {
       try {
@@ -103,8 +101,8 @@ class CollectorExporter implements sdk.SpanExporter {
             break;
 
           case CollectorExporterProtocol.httpProtobuf:
-            final headers = {'Content-Type': 'application/x-protobuf'}
-              ..addAll(this.headers);
+            final headers = {'Content-Type': 'application/x-protobuf'}..addAll(
+                this.headers); //only for http because gRPC assumes protobuf
 
             final response = await client.post(uri,
                 body: body.writeToBuffer(), headers: headers);
