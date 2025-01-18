@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0. Please see https://github.com/Workiva/opentelemetry-dart/blob/master/LICENSE for more information
 
 import 'dart:async';
-import 'dart:math';
 
 import 'package:fixnum/fixnum.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
+import 'package:grpc/grpc.dart';
 
 import '../../../../api.dart' as api;
 import '../../../../sdk.dart' as sdk;
@@ -16,18 +16,36 @@ import '../../proto/opentelemetry/proto/common/v1/common.pb.dart' as pb_common;
 import '../../proto/opentelemetry/proto/resource/v1/resource.pb.dart'
     as pb_resource;
 import '../../proto/opentelemetry/proto/trace/v1/trace.pb.dart' as pb_trace;
+import '../../proto/opentelemetry/proto/collector/trace/v1/trace_service.pbgrpc.dart'
+    as pb_trace_service_grpc;
+
+enum CollectorExporterProtocol { httpProtobuf, gRPC }
 
 class CollectorExporter implements sdk.SpanExporter {
   final Logger _log = Logger('opentelemetry.CollectorExporter');
 
+  final CollectorExporterProtocol protocol;
   final Uri uri;
   final http.Client client;
   final Map<String, String> headers;
   var _isShutdown = false;
+  late pb_trace_service_grpc.TraceServiceClient _clientStub;
 
-  CollectorExporter(this.uri,
-      {http.Client? httpClient, this.headers = const {}})
-      : client = httpClient ?? http.Client();
+  CollectorExporter(
+    this.uri, {
+    http.Client? httpClient,
+    this.headers = const {},
+    this.protocol = CollectorExporterProtocol.httpProtobuf,
+  }) : client = httpClient ?? http.Client() {
+    if (protocol == CollectorExporterProtocol.gRPC) {
+      _clientStub = pb_trace_service_grpc.TraceServiceClient(
+        ClientChannel(
+          uri.host,
+          port: uri.port,
+        ),
+      );
+    }
+  }
 
   @override
   void export(List<sdk.ReadOnlySpan> spans) {
@@ -46,47 +64,30 @@ class CollectorExporter implements sdk.SpanExporter {
     Uri uri,
     List<sdk.ReadOnlySpan> spans,
   ) async {
-    const maxRetries = 3;
-    var retries = 0;
-    // Retryable status from the spec: https://opentelemetry.io/docs/specs/otlp/#failures-1
-    const valid_retry_codes = [429, 502, 503, 504];
+    try {
+      final body = pb_trace_service.ExportTraceServiceRequest(
+          resourceSpans: _spansToProtobuf(spans));
 
-    final body = pb_trace_service.ExportTraceServiceRequest(
-        resourceSpans: _spansToProtobuf(spans));
-    final headers = {'Content-Type': 'application/x-protobuf'}
-      ..addAll(this.headers);
+      switch (protocol) {
+        case CollectorExporterProtocol.gRPC:
+          await _clientStub.export(
+            body,
+            options: CallOptions(
+              metadata: headers,
+            ),
+          );
+          break;
 
-    while (retries < maxRetries) {
-      try {
-        final response = await client.post(uri,
-            body: body.writeToBuffer(), headers: headers);
-        if (response.statusCode == 200) {
-          return;
-        }
-        // If the response is not 200, log a warning
-        _log.warning('Failed to export ${spans.length} spans. '
-            'HTTP status code: ${response.statusCode}');
-        // If the response is not a valid retry code, do not retry
-        if (!valid_retry_codes.contains(response.statusCode)) {
-          return;
-        }
-      } catch (e) {
-        _log.warning('Failed to export ${spans.length} spans. $e');
-        return;
+        case CollectorExporterProtocol.httpProtobuf:
+          final headers = {'Content-Type': 'application/x-protobuf'}
+            ..addAll(this.headers);
+
+          await client.post(uri, body: body.writeToBuffer(), headers: headers);
+          break;
       }
-      // Exponential backoff with jitter
-      final delay =
-          calculateJitteredDelay(retries++, Duration(milliseconds: 100));
-      await Future.delayed(delay);
+    } catch (e) {
+      _log.warning('Failed to export ${spans.length} spans.', e);
     }
-    _log.severe(
-        'Failed to export ${spans.length} spans after $maxRetries retries');
-  }
-
-  Duration calculateJitteredDelay(int retries, Duration baseDelay) {
-    final delay = baseDelay.inMilliseconds * pow(2, retries);
-    final jitter = Random().nextDouble() * delay;
-    return Duration(milliseconds: (delay + jitter).toInt());
   }
 
   /// Group and construct the protobuf equivalent of the given list of [api.Span]s.
@@ -141,9 +142,7 @@ class CollectorExporter implements sdk.SpanExporter {
           traceId: link.context.traceId.get(),
           spanId: link.context.spanId.get(),
           traceState: link.context.traceState.toString(),
-          attributes: attrs,
-          droppedAttributesCount: link.droppedAttributes,
-          flags: link.context.traceFlags));
+          attributes: attrs));
     }
     return pbLinks;
   }
@@ -196,28 +195,22 @@ class CollectorExporter implements sdk.SpanExporter {
     }
 
     return pb_trace.Span(
-      traceId: span.spanContext.traceId.get(),
-      spanId: span.spanContext.spanId.get(),
-      traceState: span.spanContext.traceState.toString(),
-      parentSpanId: span.parentSpanId.get(),
-      name: span.name,
-      kind: spanKind,
-      startTimeUnixNano: span.startTime,
-      endTimeUnixNano: span.endTime,
-      attributes: span.attributes.keys.map((key) => pb_common.KeyValue(
-          key: key,
-          value: _attributeValueToProtobuf(span.attributes.get(key)!))),
-      droppedAttributesCount:
-          span.attributes.length > 0 ? span.droppedAttributes : null,
-      events: _spanEventsToProtobuf(span.events),
-      droppedEventsCount:
-          span.events.isNotEmpty ? span.droppedEventsCount : null,
-      links: _spanLinksToProtobuf(span.links),
-      droppedLinksCount: span.links.isNotEmpty ? span.droppedLinksCount : null,
-      status:
-          pb_trace.Status(code: statusCode, message: span.status.description),
-      flags: span.spanContext.traceFlags,
-    );
+        traceId: span.spanContext.traceId.get(),
+        spanId: span.spanContext.spanId.get(),
+        parentSpanId: span.parentSpanId.get(),
+        name: span.name,
+        startTimeUnixNano: span.startTime,
+        endTimeUnixNano: span.endTime,
+        attributes: span.attributes.keys.map((key) => pb_common.KeyValue(
+            key: key,
+            value: _attributeValueToProtobuf(span.attributes.get(key)!))),
+        events: _spanEventsToProtobuf(span.events),
+        droppedEventsCount:
+            span.events.isNotEmpty ? span.droppedEventsCount : null,
+        status:
+            pb_trace.Status(code: statusCode, message: span.status.description),
+        kind: spanKind,
+        links: _spanLinksToProtobuf(span.links));
   }
 
   pb_common.AnyValue _attributeValueToProtobuf(Object value) {
@@ -268,8 +261,6 @@ class CollectorExporter implements sdk.SpanExporter {
     return pb_common.AnyValue();
   }
 
-  @Deprecated(
-      'This method will be removed in 0.19.0. Use [SpanProcessor] instead.')
   @override
   void forceFlush() {
     return;
