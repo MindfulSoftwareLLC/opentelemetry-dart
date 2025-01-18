@@ -2,6 +2,10 @@
 
 This repository is the Dart implementation of the [OpenTelemetry project](https://opentelemetry.io/). All contributions and designs should follow the [OpenTelemetry specification](https://github.com/open-telemetry/opentelemetry-specification).
 
+- Supports gRPC and http 
+- Supports protobuf only, does not currently support JSON
+- Does not support Dart 2. We are open to supporting Dart 2 on request.
+
 ## Project Status
 
 | Signal | Status |
