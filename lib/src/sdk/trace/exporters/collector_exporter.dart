@@ -2,22 +2,23 @@
 // Licensed under the Apache License, Version 2.0. Please see https://github.com/Workiva/opentelemetry-dart/blob/master/LICENSE for more information
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:fixnum/fixnum.dart';
+import 'package:grpc/grpc.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
-import 'package:grpc/grpc.dart';
 
 import '../../../../api.dart' as api;
 import '../../../../sdk.dart' as sdk;
 import '../../proto/opentelemetry/proto/collector/trace/v1/trace_service.pb.dart'
     as pb_trace_service;
+import '../../proto/opentelemetry/proto/collector/trace/v1/trace_service.pbgrpc.dart'
+    as pb_trace_service_grpc;
 import '../../proto/opentelemetry/proto/common/v1/common.pb.dart' as pb_common;
 import '../../proto/opentelemetry/proto/resource/v1/resource.pb.dart'
     as pb_resource;
 import '../../proto/opentelemetry/proto/trace/v1/trace.pb.dart' as pb_trace;
-import '../../proto/opentelemetry/proto/collector/trace/v1/trace_service.pbgrpc.dart'
-    as pb_trace_service_grpc;
 
 enum CollectorExporterProtocol { httpProtobuf, gRPC }
 
@@ -64,30 +65,77 @@ class CollectorExporter implements sdk.SpanExporter {
     Uri uri,
     List<sdk.ReadOnlySpan> spans,
   ) async {
-    try {
-      final body = pb_trace_service.ExportTraceServiceRequest(
-          resourceSpans: _spansToProtobuf(spans));
+    const maxRetries = 3;
+    var retries = 0;
+    // Retryable status from the spec: https://opentelemetry.io/docs/specs/otlp/#failures-1
+    const valid_retry_codes = [429, 502, 503, 504];
+    const retryable_grpc_codes = [
+      StatusCode.resourceExhausted,
+      StatusCode.unavailable,
+      StatusCode.deadlineExceeded,
+    ];
 
-      switch (protocol) {
-        case CollectorExporterProtocol.gRPC:
-          await _clientStub.export(
-            body,
-            options: CallOptions(
-              metadata: headers,
-            ),
-          );
-          break;
+    final body = pb_trace_service.ExportTraceServiceRequest(
+        resourceSpans: _spansToProtobuf(spans));
 
-        case CollectorExporterProtocol.httpProtobuf:
-          final headers = {'Content-Type': 'application/x-protobuf'}
-            ..addAll(this.headers);
+    while (retries < maxRetries) {
+      try {
+        switch (protocol) {
+          case CollectorExporterProtocol.gRPC:
+            try {
+              await _clientStub.export(
+                body,
+                options: CallOptions(
+                  metadata: headers,
+                ),
+              );
+              return; // Successful gRPC call
+            } on GrpcError catch (e) {
+              _log.warning(
+                  'Failed to export ${spans.length} spans. gRPC status: ${e.code}');
+              if (!retryable_grpc_codes.contains(e.code)) {
+                return; // Don't retry if not a retryable code
+              }
+              // Will retry if code is retryable
+            }
+            break;
 
-          await client.post(uri, body: body.writeToBuffer(), headers: headers);
-          break;
+          case CollectorExporterProtocol.httpProtobuf:
+            final headers = {'Content-Type': 'application/x-protobuf'}
+              ..addAll(this.headers);
+
+            final response = await client.post(uri,
+                body: body.writeToBuffer(), headers: headers);
+
+            if (response.statusCode == 200) {
+              return;
+            }
+            // If the response is not 200, log a warning
+            _log.warning('Failed to export ${spans.length} spans. '
+                'HTTP status code: ${response.statusCode}');
+            // If the response is not a valid retry code, do not retry
+            if (!valid_retry_codes.contains(response.statusCode)) {
+              return;
+            }
+        }
+      } catch (e) {
+        _log.warning('Failed to export ${spans.length} spans. $e');
+        return; // Don't retry on unexpected errors
       }
-    } catch (e) {
-      _log.warning('Failed to export ${spans.length} spans.', e);
+
+      // Exponential backoff with jitter for both protocols
+      final delay =
+          calculateJitteredDelay(retries++, Duration(milliseconds: 100));
+      await Future.delayed(delay);
     }
+    _log.severe(
+        'Failed to export ${spans.length} spans after $maxRetries retries');
+  }
+
+  Duration calculateJitteredDelay(int retries, Duration baseDelay) {
+    final delay = baseDelay.inMilliseconds * pow(2, retries);
+    final jitter = Random().nextDouble() * delay;
+    return Duration(milliseconds: (delay + jitter).toInt());
   }
 
   /// Group and construct the protobuf equivalent of the given list of [api.Span]s.
