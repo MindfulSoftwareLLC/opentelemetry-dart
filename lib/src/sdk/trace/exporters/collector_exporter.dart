@@ -77,6 +77,8 @@ class CollectorExporter implements sdk.SpanExporter {
 
     final body = pb_trace_service.ExportTraceServiceRequest(
         resourceSpans: _spansToProtobuf(spans));
+    final headers = {'Content-Type': 'application/x-protobuf'}
+      ..addAll(this.headers);
 
     while (retries < maxRetries) {
       try {
@@ -117,6 +119,7 @@ class CollectorExporter implements sdk.SpanExporter {
             if (!valid_retry_codes.contains(response.statusCode)) {
               return;
             }
+            break;
         }
       } catch (e) {
         _log.warning('Failed to export ${spans.length} spans. $e');
@@ -190,7 +193,9 @@ class CollectorExporter implements sdk.SpanExporter {
           traceId: link.context.traceId.get(),
           spanId: link.context.spanId.get(),
           traceState: link.context.traceState.toString(),
-          attributes: attrs));
+          attributes: attrs,
+          droppedAttributesCount: link.droppedAttributes,
+          flags: link.context.traceFlags));
     }
     return pbLinks;
   }
@@ -258,7 +263,10 @@ class CollectorExporter implements sdk.SpanExporter {
         status:
             pb_trace.Status(code: statusCode, message: span.status.description),
         kind: spanKind,
-        links: _spanLinksToProtobuf(span.links));
+        flags: span.spanContext.traceFlags,
+        links: _spanLinksToProtobuf(
+          span.links,
+        ));
   }
 
   pb_common.AnyValue _attributeValueToProtobuf(Object value) {
@@ -310,6 +318,8 @@ class CollectorExporter implements sdk.SpanExporter {
   }
 
   @override
+  @Deprecated(
+      'This method will be removed in 0.19.0. Use [SpanProcessor] instead.')
   void forceFlush() {
     return;
   }
